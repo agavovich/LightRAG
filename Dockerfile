@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# Frontend build stage
+# -------------------- FRONTEND --------------------
 FROM oven/bun:1 AS frontend-builder
 
 WORKDIR /app
@@ -9,12 +9,13 @@ WORKDIR /app
 COPY lightrag_webui/ ./lightrag_webui/
 
 # Build frontend assets for inclusion in the API package
-RUN --mount=type=cache,id=bun-cache,target=/root/.bun/install/cache \
+RUN --mount=type=cache,id=cache-bun,target=/root/.bun/install/cache \
     cd lightrag_webui \
     && bun install --frozen-lockfile \
     && bun run build
 
-# Python build stage - using uv for faster package installation
+
+# -------------------- BACKEND BUILDER --------------------
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -43,7 +44,7 @@ COPY setup.py .
 COPY uv.lock .
 
 # Install base, API, and offline extras without the project to improve caching
-RUN --mount=type=cache,id=pip-cache,target=/root/.local/share/uv \
+RUN --mount=type=cache,id=cache-pip,target=/root/.local/share/uv \
     uv sync --frozen --no-dev --extra api --extra offline --no-install-project --no-editable
 
 # Copy project sources after dependency layer
@@ -53,17 +54,17 @@ COPY lightrag/ ./lightrag/
 COPY --from=frontend-builder /app/lightrag/api/webui ./lightrag/api/webui
 
 # Sync project in non-editable mode and ensure pip is available for runtime installs
-RUN --mount=type=cache,id=pip-cache,target=/root/.local/share/uv \
+RUN --mount=type=cache,id=cache-pip,target=/root/.local/share/uv \
     uv sync --frozen --no-dev --extra api --extra offline --no-editable \
     && /app/.venv/bin/python -m ensurepip --upgrade
 
 # Prepare offline cache directory and pre-populate tiktoken data
-# Use uv run to execute commands from the virtual environment
 RUN mkdir -p /app/data/tiktoken \
     && uv run lightrag-download-cache --cache-dir /app/data/tiktoken || status=$?; \
     if [ -n "${status:-}" ] && [ "$status" -ne 0 ] && [ "$status" -ne 2 ]; then exit "$status"; fi
 
-# Final stage
+
+# -------------------- FINAL IMAGE --------------------
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -86,7 +87,7 @@ ENV PATH=/app/.venv/bin:/root/.local/bin:$PATH
 
 # Install dependencies with uv sync (uses locked versions from uv.lock)
 # And ensure pip is available for runtime installs
-RUN --mount=type=cache,id=pip-cache,target=/root/.local/share/uv \
+RUN --mount=type=cache,id=cache-pip,target=/root/.local/share/uv \
     uv sync --frozen --no-dev --extra api --extra offline --no-editable \
     && /app/.venv/bin/python -m ensurepip --upgrade
 
@@ -96,7 +97,7 @@ RUN mkdir -p /app/data/rag_storage /app/data/inputs /app/data/tiktoken
 # Copy offline cache into the newly created directory
 COPY --from=builder /app/data/tiktoken /app/data/tiktoken
 
-# Point to the prepared cache
+# Environment variables
 ENV TIKTOKEN_CACHE_DIR=/app/data/tiktoken
 ENV WORKING_DIR=/app/data/rag_storage
 ENV INPUT_DIR=/app/data/inputs
